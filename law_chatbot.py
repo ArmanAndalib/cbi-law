@@ -36,6 +36,7 @@ class PersianLawChatbot:
         # Initialize Groq client
         try:
             self.groq_client = Groq(api_key=self.get_groq_api_key())
+            self.available_models = self.get_available_models()
         except Exception as e:
             print(f"❌ Error initializing Groq client: {e}")
             return
@@ -45,9 +46,7 @@ class PersianLawChatbot:
     
     def get_groq_api_key(self):
         """Get Groq API key from environment or user input"""
-        #api_key = os.getenv("GROQ_API_KEY")
-        api_key = "******"
-
+        api_key = os.getenv("GROQ_API_KEY")
         if api_key:
             return api_key
         
@@ -68,28 +67,77 @@ class PersianLawChatbot:
         print("✅ API key saved!")
         return api_key
     
+    def get_available_models(self):
+        """Get list of available Groq models"""
+        try:
+            models = self.groq_client.models.list()
+            available_models = [model.id for model in models.data]
+            print("🤖 Available Groq models:")
+            for model in available_models:
+                print(f"   - {model}")
+            return available_models
+        except Exception as e:
+            print(f"⚠️ Could not fetch available models: {e}")
+            # Return default models that are typically available
+            return [
+                "llama-3.1-8b-instant",  # Fast model, good for Persian
+                "llama-3.1-70b-versatile",  # More powerful but slower
+                "mixtral-8x7b-32768",
+                "gemma2-9b-it"
+            ]
+    
+    def select_model(self):
+        """Select the best available model for Persian"""
+        # Priority list for Persian language support
+        preferred_models = [
+            "llama-3.1-8b-instant",
+            "llama-3.1-70b-versatile", 
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+            "llama3-8b-8192"  # Fallback
+        ]
+        
+        for model in preferred_models:
+            if model in self.available_models:
+                print(f"✅ Selected model: {model}")
+                return model
+        
+        # If no preferred models available, use the first available one
+        if self.available_models:
+            selected = self.available_models[0]
+            print(f"⚠️ Using available model: {selected}")
+            return selected
+        
+        # Fallback
+        print("⚠️ Using default model: llama-3.1-8b-instant")
+        return "llama-3.1-8b-instant"
+    
     def find_relevant_context(self, question, k=4):
         """Find relevant law sections for the question"""
         try:
             docs = self.vector_store.similarity_search(question, k=k)
             context = "\n\n".join([doc.page_content for doc in docs])
-            return context
+            sources = list(set([doc.metadata.get('source', 'Unknown') for doc in docs]))
+            return context, sources
         except Exception as e:
             print(f"Error searching database: {e}")
-            return ""
+            return "", []
     
     def ask_question(self, question):
         """Ask a question about Persian law"""
         if not question.strip():
-            return "لطفاً یک سوال معتبر مطرح کنید."
+            return "لطفاً یک سوال معتبر مطرح کنید.", []
         
         print("🔍 Searching in legal database...")
-        context = self.find_relevant_context(question)
+        context, sources = self.find_relevant_context(question)
         
         if not context:
-            return "متاسفانه اطلاعات مرتبطی در پایگاه داده قوانین یافت نشد. لطفاً سوال خود را به شکل دیگری مطرح کنید."
+            return "متاسفانه اطلاعات مرتبطی در پایگاه داده قوانین یافت نشد. لطفاً سوال خود را به شکل دیگری مطرح کنید.", []
         
-        # System prompt in Persian
+        # Select the best available model
+        model_name = self.select_model()
+        
+        # Enhanced system prompt in Persian
         system_prompt = """
         شما یک دستیار حقوقی هوشمند و متخصص در قوانین ایران هستید. وظیفه شما پاسخ به سوالات حقوقی بر اساس متون قانونی ارائه شده است.
 
@@ -100,6 +148,7 @@ class PersianLawChatbot:
         4. اگر پاسخ در متن موجود نیست، صادقانه بگویید: "پاسخ این سوال در متون قانونی موجود یافت نشد."
         5. از ساختار منظم استفاده کنید اما بیش از حد رسمی نباشید
         6. در پاسخ به موارد حقوقی، دقت و احتیاط را رعایت کنید
+        7. در صورت اشاره به مواد قانونی، شماره ماده را ذکر کنید
 
         متن قانونی مرتبط:
         {context}
@@ -108,7 +157,7 @@ class PersianLawChatbot:
         formatted_system_prompt = system_prompt.format(context=context)
         
         try:
-            print("🤖 Generating answer...")
+            print(f"🤖 Generating answer with {model_name}...")
             # Get response from Groq
             chat_completion = self.groq_client.chat.completions.create(
                 messages=[
@@ -121,9 +170,10 @@ class PersianLawChatbot:
                         "content": f"سوال: {question}"
                     }
                 ],
-                model="llama3-8b-8192",
+                model=model_name,
                 temperature=0.3,
-                max_tokens=1024
+                max_tokens=1024,
+                top_p=0.9
             )
             
             answer = chat_completion.choices[0].message.content
@@ -131,13 +181,17 @@ class PersianLawChatbot:
             # Update chat history
             self.chat_history.append({
                 "question": question, 
-                "answer": answer
+                "answer": answer,
+                "sources": sources,
+                "model_used": model_name
             })
             
-            return answer
+            return answer, sources
             
         except Exception as e:
-            return f"خطا در ارتباط با سرویس هوش مصنوعی: {str(e)}"
+            error_msg = f"خطا در ارتباط با سرویس هوش مصنوعی: {str(e)}"
+            print(f"❌ API Error: {e}")
+            return error_msg, []
 
 def main():
     print("🤖 PERSIAN LAW CHATBOT")
@@ -170,9 +224,11 @@ def main():
                 if not user_question:
                     continue
                 
-                answer = chatbot.ask_question(user_question)
+                answer, sources = chatbot.ask_question(user_question)
                 
                 print(f"\n🤖 ربات: {answer}")
+                if sources:
+                    print(f"📚 منابع: {sources}")
                 print(f"💬 ({len(chatbot.chat_history)} سوال در این نشست)")
                     
             except KeyboardInterrupt:
